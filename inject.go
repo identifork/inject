@@ -330,6 +330,11 @@ StructLoop:
 			continue
 		}
 
+		// Slices of interfaces inject is also handled in a second pass
+		if fieldType.Kind() == reflect.Slice && fieldType.Elem().Kind() == reflect.Interface {
+			continue
+		}
+
 		// Maps are created and required to be private.
 		if fieldType.Kind() == reflect.Map {
 			if !tag.Private {
@@ -439,7 +444,7 @@ func (g *Graph) populateUnnamedInterface(o *Object) error {
 
 		// We only handle interface injection here. Other cases including errors
 		// are handled in the first pass when we inject pointers.
-		if fieldType.Kind() != reflect.Interface {
+		if fieldType.Kind() != reflect.Interface && fieldType.Kind() != reflect.Slice {
 			continue
 		}
 
@@ -463,47 +468,67 @@ func (g *Graph) populateUnnamedInterface(o *Object) error {
 			panic(fmt.Sprintf("unhandled named instance with name %s", tag.Name))
 		}
 
-		// Find one, and only one assignable value for the field.
-		var found *Object
-		for _, existing := range g.unnamed {
-			if existing.private {
-				continue
-			}
-			if existing.reflectType.AssignableTo(fieldType) {
-				if found != nil {
-					return fmt.Errorf(
-						"found two assignable values for field %s in type %s. one type "+
-							"%s with value %v and another type %s with value %v",
-						o.reflectType.Elem().Field(i).Name,
-						o.reflectType,
-						found.reflectType,
-						found.Value,
-						existing.reflectType,
-						existing.reflectValue,
-					)
+		if fieldType.Kind() == reflect.Interface {
+			// Find one, and only one assignable value for the field.
+			var found *Object
+
+			for _, existing := range g.unnamed {
+				if existing.private {
+					continue
 				}
-				found = existing
-				field.Set(reflect.ValueOf(existing.Value))
-				if g.Logger != nil {
-					g.Logger.Debugf(
-						"assigned existing %s to interface field %s in %s",
-						existing,
-						o.reflectType.Elem().Field(i).Name,
-						o,
-					)
+
+				if existing.reflectType.AssignableTo(fieldType) {
+
+					if found != nil {
+						return fmt.Errorf(
+							"found two assignable values for field %s in type %s. one type "+
+								"%s with value %v and another type %s with value %v",
+							o.reflectType.Elem().Field(i).Name,
+							o.reflectType,
+							found.reflectType,
+							found.Value,
+							existing.reflectType,
+							existing.reflectValue,
+						)
+					}
+
+					field.Set(reflect.ValueOf(existing.Value))
+					if g.Logger != nil {
+						g.Logger.Debugf(
+							"assigned existing %s to interface field %s in %s",
+							existing,
+							o.reflectType.Elem().Field(i).Name,
+							o,
+						)
+					}
+
+					o.addDep(fieldName, existing)
+
+					found = existing
 				}
-				o.addDep(fieldName, existing)
 			}
+
+			// If we didn't find an assignable value, we're missing something.
+			if found == nil {
+				return fmt.Errorf(
+					"found no assignable value for field %s in type %s",
+					o.reflectType.Elem().Field(i).Name,
+					o.reflectType,
+				)
+			}
+		} else {
+			// An array, allow multiple (or none).
+			for _, existing := range g.unnamed {
+				if existing.private {
+					continue
+				}
+				if existing.reflectType.AssignableTo(fieldType.Elem()) {
+					field.Set(reflect.Append(field, reflect.ValueOf(existing.Value)))
+				}
+			}
+
 		}
 
-		// If we didn't find an assignable value, we're missing something.
-		if found == nil {
-			return fmt.Errorf(
-				"found no assignable value for field %s in type %s",
-				o.reflectType.Elem().Field(i).Name,
-				o.reflectType,
-			)
-		}
 	}
 	return nil
 }
