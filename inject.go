@@ -152,6 +152,28 @@ func (g *Graph) Provide(objects ...*Object) error {
 	return nil
 }
 
+// Populate a single object if incomplete
+func (g *Graph) PopulateSingle(o *Object) error {
+	if o.Complete {
+		return nil
+	}
+
+	if err := g.populateExplicit(o); err != nil {
+		return err
+	}
+
+	if o.Complete {
+		return nil
+	}
+
+	if err := g.populateUnnamedInterface(o); err != nil {
+		return err
+	}
+
+	return nil
+
+}
+
 // Populate the incomplete Objects.
 func (g *Graph) Populate() error {
 	for _, o := range g.named {
