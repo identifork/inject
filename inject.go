@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
+	"strings"
 
 	"github.com/facebookgo/structtag"
 )
@@ -87,7 +88,7 @@ type Graph struct {
 	Logger      Logger // Optional, will trigger debug logging.
 	unnamed     []*Object
 	unnamedType map[reflect.Type]bool
-	named       map[string]*Object
+	named       map[string][]*Object
 }
 
 // Provide objects to the Graph. The Object documentation describes
@@ -130,13 +131,15 @@ func (g *Graph) Provide(objects ...*Object) error {
 			g.unnamed = append(g.unnamed, o)
 		} else {
 			if g.named == nil {
-				g.named = make(map[string]*Object)
+				g.named = make(map[string][]*Object)
 			}
 
-			if g.named[o.Name] != nil {
-				return fmt.Errorf("provided two instances named %s", o.Name)
-			}
-			g.named[o.Name] = o
+			// if g.named[o.Name] != nil {
+			// 	return fmt.Errorf("provided two instances named %s", o.Name)
+			// }
+			g.named[o.Name] = append(g.named[o.Name], o)
+
+			g.Logger.Debugf("added named %s (total with name: %d)", o.Name, len(g.named[o.Name]))
 		}
 
 		if g.Logger != nil {
@@ -176,13 +179,15 @@ func (g *Graph) PopulateSingle(o *Object) error {
 
 // Populate the incomplete Objects.
 func (g *Graph) Populate() error {
-	for _, o := range g.named {
-		if o.Complete {
-			continue
-		}
+	for _, os := range g.named {
+		for _, o := range os {
+			if o.Complete {
+				continue
+			}
 
-		if err := g.populateExplicit(o); err != nil {
-			return err
+			if err := g.populateExplicit(o); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -218,13 +223,15 @@ func (g *Graph) Populate() error {
 		}
 	}
 
-	for _, o := range g.named {
-		if o.Complete {
-			continue
-		}
+	for _, os := range g.named {
+		for _, o := range os {
+			if o.Complete {
+				continue
+			}
 
-		if err := g.populateUnnamedInterface(o); err != nil {
-			return err
+			if err := g.populateUnnamedInterface(o); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -283,38 +290,63 @@ StructLoop:
 
 		// Named injects must have been explicitly provided.
 		if tag.Name != "" {
-			existing := g.named[tag.Name]
-			if existing == nil {
+			existings, ok := g.named[tag.Name]
+			if !ok || len(existings) == 0 {
 				return fmt.Errorf(
-					"did not find object named %s required by field %s in type %s",
+					"no objects named %s required by field %s in type %s",
 					tag.Name,
 					o.reflectType.Elem().Field(i).Name,
 					o.reflectType,
 				)
 			}
 
-			if !existing.reflectType.AssignableTo(fieldType) {
+			var existingTypes []string
+			var found bool
+
+			for _, existing := range existings {
+
+				if existing.reflectType.AssignableTo(fieldType) {
+
+					if found {
+						return fmt.Errorf(
+							"found multiple objects named %s of type %s assignable to field %s (%s) in type %s",
+							tag.Name,
+							fieldType,
+							o.reflectType.Elem().Field(i).Name,
+							strings.Join(existingTypes, ", "),
+							o.reflectType,
+						)
+					}
+
+					field.Set(reflect.ValueOf(existing.Value))
+					if g.Logger != nil {
+						g.Logger.Debugf(
+							"assigned %s to field %s in %s",
+							existing,
+							o.reflectType.Elem().Field(i).Name,
+							o,
+						)
+					}
+					o.addDep(fieldName, existing)
+
+					found = true
+				}
+
+				existingTypes = append(existingTypes, fmt.Sprintf("%s", existing.reflectType))
+			}
+
+			if !found {
 				return fmt.Errorf(
-					"object named %s of type %s is not assignable to field %s (%s) in type %s",
+					"objects named %s of type %s is not assignable to field %s (%s) in type %s",
 					tag.Name,
 					fieldType,
 					o.reflectType.Elem().Field(i).Name,
-					existing.reflectType,
+					strings.Join(existingTypes, ", "),
 					o.reflectType,
 				)
 			}
 
-			field.Set(reflect.ValueOf(existing.Value))
-			if g.Logger != nil {
-				g.Logger.Debugf(
-					"assigned %s to field %s in %s",
-					existing,
-					o.reflectType.Elem().Field(i).Name,
-					o,
-				)
-			}
-			o.addDep(fieldName, existing)
-			continue StructLoop
+			continue
 		}
 
 		// Inline struct values indicate we want to traverse into it, but not
@@ -564,9 +596,11 @@ func (g *Graph) Objects() []*Object {
 			objects = append(objects, o)
 		}
 	}
-	for _, o := range g.named {
-		if !o.embedded {
-			objects = append(objects, o)
+	for _, os := range g.named {
+		for _, o := range os {
+			if !o.embedded {
+				objects = append(objects, o)
+			}
 		}
 	}
 	// randomize to prevent callers from relying on ordering
